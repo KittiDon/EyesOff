@@ -29,7 +29,7 @@ PLIST
 
 swiftc -O \
     -target x86_64-apple-macosx13.0 \
-    -framework Cocoa -framework ServiceManagement -framework IOKit \
+    -framework Cocoa -framework ServiceManagement \
     -o "$APP/Contents/MacOS/EyesOff" \
     "$SRC_DIR/Sources/main.swift"
 
