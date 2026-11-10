@@ -1,5 +1,35 @@
 import Cocoa
 import ServiceManagement
+import IOKit.pwr_mgt
+
+// MARK: - Keep-awake
+//
+// A "prevent display sleep" power assertion stops idle sleep, display sleep
+// and the screen saver all at once, while leaving every running process
+// (Claude Code, builds, downloads) untouched. It is released automatically if
+// the app dies, so it can never leave the Mac stuck awake.
+
+final class AwakeAssertion {
+    private var id: IOPMAssertionID = 0
+    private(set) var isHeld = false
+    private let reason: String
+    init(reason: String) { self.reason = reason }
+
+    func hold() {
+        guard !isHeld else { return }
+        let result = IOPMAssertionCreateWithName(
+            kIOPMAssertionTypePreventUserIdleDisplaySleep as CFString,
+            IOPMAssertionLevel(kIOPMAssertionLevelOn),
+            reason as CFString, &id)
+        isHeld = (result == kIOReturnSuccess)
+    }
+
+    func release() {
+        guard isHeld else { return }
+        IOPMAssertionRelease(id)
+        isHeld = false
+    }
+}
 
 // MARK: - Backlight control
 //
@@ -137,6 +167,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var localMonitor: Any?
     private var globalMonitor: Any?
     private let backlight = Backlight()
+    /// The user's "Keep Mac Awake" switch.
+    private let keepAwake = AwakeAssertion(reason: "EyesOff: Keep Mac Awake is on")
+    /// Held only while blacked out, so the Mac never sleeps behind the black screen.
+    private let blankAwake = AwakeAssertion(reason: "EyesOff: screen blacked out, tasks keep running")
+    private let keepAwakeKey = "keepAwake"
+    private var keepsAwake: Bool {
+        get { UserDefaults.standard.bool(forKey: keepAwakeKey) }
+        set { UserDefaults.standard.set(newValue, forKey: keepAwakeKey) }
+    }
 
     private var isBlanked = false
     private var armedAt: Date = .distantPast
@@ -159,10 +198,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         backlight.restoreStashIfNeeded()
         installSafetyNet()
+        if keepsAwake { keepAwake.hold() }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
-            button.toolTip = "Click to black out the screen — any activity brings it back"
+            button.toolTip = "Click to black out the screen (Mac stays awake) · right-click for Keep Mac Awake"
             button.target = self
             button.action = #selector(statusItemClicked)
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
@@ -246,6 +286,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         blank()
         print("[selftest] screens covered: \(self.windows.count) (expected \(NSScreen.screens.count))")
         print("[selftest] backlight dimmed: \(self.backlight.hasDimmedDisplays)")
+        print("[selftest] awake assertion while blanked: \(self.blankAwake.isHeld) (expected true)")
         print("[selftest] brightness before=\(brightnessBefore) while blanked=\(self.backlight.currentPrimaryBrightness())")
 
         // The monitor mask decides what is ever delivered to us at all.
@@ -279,6 +320,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 print("[selftest] brightness after restore=\(self.backlight.currentPrimaryBrightness()) (expected \(brightnessBefore))")
+                print("[selftest] awake assertion released: \(!self.blankAwake.isHeld) (expected true)")
                 print("[selftest] windows after restore: \(self.windows.count) (expected 0)")
                 print("[selftest] stash cleared: \(UserDefaults.standard.object(forKey: "dimmedBrightnessStash") == nil)")
                 self.backlight.restore()
@@ -316,7 +358,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func showMenu() {
         let menu = NSMenu()
 
-        let blankItem = NSMenuItem(title: "Black Out Screen", action: #selector(blankFromMenu), keyEquivalent: "")
+        let awakeItem = NSMenuItem(title: "Keep Mac Awake (no sleep, no screen saver)",
+                                   action: #selector(toggleKeepAwake), keyEquivalent: "")
+        awakeItem.target = self
+        awakeItem.state = keepAwake.isHeld ? .on : .off
+        menu.addItem(awakeItem)
+
+        let blankItem = NSMenuItem(title: "Black Out Screen (Mac stays awake)", action: #selector(blankFromMenu), keyEquivalent: "")
         blankItem.target = self
         menu.addItem(blankItem)
 
@@ -338,11 +386,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
-        let aboutItem = NSMenuItem(title: "Click the eyes to black out · any key, click or",
+        let aboutItem = NSMenuItem(title: "Click the eyes to black out · any key or",
                                    action: nil, keyEquivalent: "")
         aboutItem.isEnabled = false
         menu.addItem(aboutItem)
-        let aboutItem2 = NSMenuItem(title: "mouse move brings it back exactly as it was",
+        let aboutItem2 = NSMenuItem(title: "click brings it back exactly as it was",
                                     action: nil, keyEquivalent: "")
         aboutItem2.isEnabled = false
         menu.addItem(aboutItem2)
@@ -359,6 +407,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func blankFromMenu() { blank() }
+
+    @objc private func toggleKeepAwake() {
+        if keepAwake.isHeld { keepAwake.release() } else { keepAwake.hold() }
+        keepsAwake = keepAwake.isHeld
+        setIcon(blanked: isBlanked)
+    }
 
     @objc private func toggleDim() {
         dimsBacklight.toggle()
@@ -386,7 +440,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// matches Wi-Fi/battery/Bluetooth in both light and dark menu bars.
     private func setIcon(blanked: Bool) {
         guard let button = statusItem.button else { return }
-        let name = blanked ? "eye.slash" : "eyes"
+        let name = blanked ? "eye.slash" : (keepAwake.isHeld ? "eyes.inverse" : "eyes")
         let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
         if let image = NSImage(systemSymbolName: name, accessibilityDescription: "EyesOff")?
             .withSymbolConfiguration(config) {
@@ -410,6 +464,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         isBlanked = true
         armedAt = Date()
+        blankAwake.hold()
 
         for screen in screens {
             let window = BlackWindow(contentRect: screen.frame,
@@ -482,6 +537,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Backlight first, so the screen is already lit behind the black cover
         // and the desktop doesn't fade in.
         backlight.restore()
+        blankAwake.release()
 
         if let monitor = localMonitor { NSEvent.removeMonitor(monitor); localMonitor = nil }
         if let monitor = globalMonitor { NSEvent.removeMonitor(monitor); globalMonitor = nil }

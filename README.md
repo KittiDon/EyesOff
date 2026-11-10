@@ -21,6 +21,15 @@ zero and restores your exact previous level afterwards.
 screen back, so a nudged mouse or a brushed trackpad won't give you away. This
 is enforced both in the event monitor mask and in the wake handler.
 
+**Your Mac keeps working.** While the screen is blacked out, EyesOff holds a
+power assertion so the Mac never idles into sleep or the screen saver. Builds,
+downloads and terminal jobs keep running behind the black screen.
+
+**Keep Mac Awake switch.** Right-click the eyes and turn on *Keep Mac Awake* to
+stop sleep and the screen saver even when the screen isn't blacked out. The icon
+fills in while it's on, and the setting is remembered across restarts. Closing
+the lid still sleeps the Mac.
+
 ## Install
 
 ```sh
